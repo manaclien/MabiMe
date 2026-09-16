@@ -1,0 +1,97 @@
+name: Build MabiMe (Windows)
+
+on:
+  push:
+    branches: [ "master", "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Qt 5.15.2 (msvc2019 64-bit)
+      uses: lukka/get-qt@v3
+      with:
+        version: "5.15.2"
+        host: windows
+        arch: win64
+        components: qtbase,qttools,qtdeclarative,qtquickcontrols2,qt3d
+
+    - name: Show Qt binaries
+      run: dir $Env:QtHome\bin
+
+    - name: Ensure MSVC environment (Visual Studio)
+      shell: powershell
+      run: |
+        Write-Host "VS installation:"
+        & "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath || Write-Host "vswhere not found"
+
+    - name: Add Qt to PATH
+      run: echo "##[set-env name=PATH]$Env:QtHome\bin;$Env:PATH"
+      shell: powershell
+
+    - name: qmake
+      run: |
+        echo "Running qmake..."
+        $qmake = Join-Path $Env:QtHome "bin\qmake.exe"
+        & $qmake MabiMe.pro
+      shell: powershell
+
+    - name: Build with nmake
+      run: |
+        echo "Building with nmake..."
+        nmake
+      shell: cmd
+
+    - name: Find executable
+      id: findexe
+      run: |
+        for /f "delims=" %%i in ('where /r . MabiMe.exe 2^>nul') do @echo %%i
+        powershell -Command "if ((Get-ChildItem -Path . -Filter 'MabiMe.exe' -Recurse -ErrorAction SilentlyContinue).Count -eq 0) { exit 2 }"
+      continue-on-error: false
+
+    - name: Get path to exe
+      shell: powershell
+      run: |
+        $exe = Get-ChildItem -Path . -Filter 'MabiMe.exe' -Recurse | Select-Object -First 1
+        if (-not $exe) { Write-Error "MabiMe.exe not found"; exit 1 }
+        Write-Host "Found exe: $($exe.FullName)"
+        echo "::set-output name=exe_path::$($exe.FullName)"
+
+    - name: windeployqt (bundle Qt runtime)
+      shell: powershell
+      run: |
+        $exe = "${{ steps.findexe.outputs.exe_path }}"
+        if (-not $exe) {
+          $exe2 = (Get-ChildItem -Path . -Filter 'MabiMe.exe' -Recurse | Select-Object -First 1).FullName
+          if (-not $exe2) { Write-Error "Exe not found"; exit 1 }
+          $exe = $exe2
+        }
+        $windeploy = Join-Path $Env:QtHome "bin\windeployqt.exe"
+        Write-Host "Using windeployqt: $windeploy"
+        & $windeploy --release $exe
+        Write-Host "windeployqt completed."
+
+    - name: Package artifact
+      shell: powershell
+      run: |
+        $exe = Get-ChildItem -Path . -Filter 'MabiMe.exe' -Recurse | Select-Object -First 1
+        if (-not $exe) { Write-Error "Exe not found for packaging"; exit 1 }
+        $outdir = Join-Path $env:GITHUB_WORKSPACE "mabime-windows-artifact"
+        New-Item -ItemType Directory -Path $outdir -Force | Out-Null
+        $exeDir = $exe.Directory.FullName
+        Copy-Item -Path (Join-Path $exeDir "*") -Destination $outdir -Recurse -Force
+        Write-Host "Packaging contents of $exeDir to $outdir"
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mabime-windows
+        path: mabime-windows-artifact
